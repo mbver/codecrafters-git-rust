@@ -1,25 +1,35 @@
+use flate2::Compression;
+use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
+
+use sha1::Digest;
+use sha1::Sha1;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
 
-use flate2::read::ZlibDecoder;
-
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args[1] == "init" {
-        fs::create_dir(".git").unwrap();
-        fs::create_dir(".git/objects").unwrap();
-        fs::create_dir(".git/refs").unwrap();
-        fs::write(".git/HEAD", "ref: refs/heads/main\n").unwrap();
-        println!("Initialized git directory");
-    } else if args[1] == "cat-file" && args[2] == "-p" {
-        cat_file(&args[3]).unwrap();
-    } else {
-        println!("unknown command: {}", args[1]);
+    match args[1].as_str() {
+        "init" => {
+            fs::create_dir(".git").unwrap();
+            fs::create_dir(".git/objects").unwrap();
+            fs::create_dir(".git/refs").unwrap();
+            fs::write(".git/HEAD", "ref: refs/heads/main\n").unwrap();
+            println!("Initialized git directory");
+        }
+        "cat-file" if args[2] == "-p" => {
+            cat_file(&args[3]).unwrap();
+        }
+        "hash-object" if args[2] == "-w" => {
+            hash_object(&args[3]).unwrap();
+        }
+        _ => {
+            println!("unknown command: {}", args[1]);
+        }
     }
 }
-
 fn cat_file(hash: &str) -> io::Result<()> {
     let object_path = format!(".git/objects/{}/{}", &hash[..2], &hash[2..]);
 
@@ -54,6 +64,36 @@ fn cat_file(hash: &str) -> io::Result<()> {
 
     // Write blob content directly to stdout.
     io::stdout().write_all(content)?;
+
+    Ok(())
+}
+
+fn hash_object(file_path: &str) -> io::Result<()> {
+    // Read file contents.
+    let content = fs::read(file_path)?;
+
+    // Build Git object: blob <size>\0<content>
+    let mut object = format!("blob {}\0", content.len()).into_bytes();
+    object.extend_from_slice(&content);
+
+    // Calculate SHA-1 of the uncompressed object.
+    let hash = Sha1::digest(&object);
+    let hash_hex = hex::encode(hash);
+
+    // Compress object using Zlib.
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&object)?;
+    let compressed = encoder.finish()?;
+
+    // Write to .git/objects/<first 2 chars>/<remaining 38 chars>.
+    let (directory, filename) = hash_hex.split_at(2);
+    let object_dir = format!(".git/objects/{directory}");
+
+    fs::create_dir_all(&object_dir)?;
+    fs::write(format!("{object_dir}/{filename}"), compressed)?;
+
+    // Print object hash.
+    println!("{hash_hex}");
 
     Ok(())
 }
