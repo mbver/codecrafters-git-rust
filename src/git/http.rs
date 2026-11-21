@@ -3,17 +3,22 @@ use std::error::Error;
 use reqwest::blocking::Client;
 
 use crate::git::pkt_line::{encode_pkt_line, parse_pkt_lines};
-
+/*
+<sha> HEAD\0multi_ack thin-pack side-band symref=HEAD:refs/heads/main agent=git/2.45.0
+└──── reference_data ────┘   └─────────────── capabilities ───────────────┘
+*/
+// get head commit SHA and branch name
 pub fn get_head(repo_url: &str) -> Result<(String, String), Box<dyn Error>> {
     let url = format!(
         "{}/info/refs?service=git-upload-pack",
         repo_url.trim_end_matches('/')
     );
-
+    // pkt_line
+    // https://github.com/user/repo/info/refs?service=git-upload-pack
     let response = Client::new().get(url).send()?.error_for_status()?;
 
     let data = response.bytes()?;
-    let packets = parse_pkt_lines(&data)?;
+    let packets = parse_pkt_lines(&data)?; // all payloads from the packets
 
     let mut head_sha = None;
     let mut branch = None;
@@ -24,11 +29,15 @@ pub fn get_head(repo_url: &str) -> Result<(String, String), Box<dyn Error>> {
         if packet.starts_with(b"# service=") {
             continue;
         }
+        /*
+        <sha> HEAD\0multi_ack thin-pack side-band symref=HEAD:refs/heads/main agent=git/2.45.0
+        └─ref data┘   └─────────────── capabilities ─────────────---------------------------──┘
+        */
 
         // Separate reference information from capabilities.
         let (reference_data, capabilities) = match packet.iter().position(|&b| b == 0) {
             Some(index) => (&packet[..index], &packet[index + 1..]),
-            None => (packet, &[][..]),
+            None => (packet, &[] as &[u8]),
         };
 
         let reference_data = std::str::from_utf8(reference_data)?;
@@ -71,6 +80,8 @@ pub fn get_head(repo_url: &str) -> Result<(String, String), Box<dyn Error>> {
 }
 
 // Fallback discovery when symref isn't advertised.
+// edge case: some server doesn't have symref=HEAD:
+// <sha> HEAD\0multi_ack thin-pack side-band refs/heads/main agent=git/2.45.0
 fn packets_for_fallback(
     head_sha: &str,
     repo_url: &str,

@@ -8,7 +8,18 @@ pub fn encode_pkt_line(data: &[u8]) -> Vec<u8> {
 
     packet
 }
+/*
+* Special control packets:
 
+0000 (length == 0): flush-pkt (marks the end of a message/section)
+
+0001 (length == 1): delim-pkt (protocol v2 delimiter between sections)
+
+0002 (length == 2): response-end-pkt (protocol v2 end-of-response marker)
+
+the first 4-bytes are length and that includes the length itself. that helps to wire special control packets with no payload
+*/
+// obtain payloads from packets
 pub fn parse_pkt_lines(data: &[u8]) -> io::Result<Vec<Vec<u8>>> {
     let mut packets = Vec::new();
     let mut cursor = 0;

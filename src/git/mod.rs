@@ -8,6 +8,7 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
+// ./your_program.sh clone https://github.com/user/repo target
 pub fn clone_repo(repo_url: &str, target_dir: &Path) -> Result<(), Box<dyn Error>> {
     // Create target directory and .git.
     fs::create_dir_all(target_dir)?;
