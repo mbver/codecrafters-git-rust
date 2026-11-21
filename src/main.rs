@@ -9,6 +9,8 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
+mod git;
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -38,6 +40,12 @@ fn main() {
             let message = &args[6];
 
             commit_tree(tree_sha, parent_sha, message).unwrap();
+        }
+        "clone" => {
+            let repo_url = &args[2];
+            let target_dir = Path::new(&args[3]);
+
+            git::clone_repo(repo_url, target_dir).unwrap();
         }
         _ => {
             println!("unknown command: {}", args[1]);
