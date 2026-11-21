@@ -32,6 +32,13 @@ fn main() {
         "write-tree" => {
             write_tree().unwrap();
         }
+        "commit-tree" => {
+            let tree_sha = &args[2];
+            let parent_sha = &args[4];
+            let message = &args[6];
+
+            commit_tree(tree_sha, parent_sha, message).unwrap();
+        }
         _ => {
             println!("unknown command: {}", args[1]);
         }
@@ -109,7 +116,6 @@ fn write_object(object_type: &str, content: &[u8]) -> io::Result<String> {
     Ok(hash_hex)
 }
 
-#[allow(dead_code)]
 struct TreeEntry {
     mode: String,
     name: String,
@@ -247,6 +253,40 @@ fn write_tree_recursive(dir: &Path) -> io::Result<String> {
 fn write_tree() -> io::Result<()> {
     let sha = write_tree_recursive(Path::new("."))?;
     println!("{sha}");
+
+    Ok(())
+}
+
+struct Commit {
+    tree_sha: String,
+    parent_sha: String,
+    author: String,
+    committer: String,
+    message: String,
+}
+impl Commit {
+    fn serialize(&self) -> Vec<u8> {
+        format!(
+            "tree {}\nparent {}\nauthor {}\ncommitter {}\n\n{}\n",
+            self.tree_sha, self.parent_sha, self.author, self.committer, self.message
+        )
+        .into_bytes()
+    }
+}
+
+fn commit_tree(tree_sha: &str, parent_sha: &str, message: &str) -> io::Result<()> {
+    let commit = Commit {
+        tree_sha: tree_sha.to_string(),
+        parent_sha: parent_sha.to_string(),
+        author: "John Doe <john@example.com> 1234567890 +0000".to_string(),
+        committer: "John Doe <john@example.com> 1234567890 +0000".to_string(),
+        message: message.to_string(),
+    };
+
+    let content = commit.serialize();
+    let hash = write_object("commit", &content)?;
+
+    println!("{hash}");
 
     Ok(())
 }
