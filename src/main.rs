@@ -7,6 +7,7 @@ use sha1::Sha1;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::path::Path;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -27,6 +28,9 @@ fn main() {
         }
         "ls-tree" if args[2] == "--name-only" => {
             ls_tree(&args[3]).unwrap();
+        }
+        "write-tree" => {
+            write_tree().unwrap();
         }
         _ => {
             println!("unknown command: {}", args[1]);
@@ -74,31 +78,35 @@ fn cat_file(hash: &str) -> io::Result<()> {
 fn hash_object(file_path: &str) -> io::Result<()> {
     // Read file contents.
     let content = fs::read(file_path)?;
+    let hash = write_object("blob", &content)?;
 
-    // Build Git object: blob <size>\0<content>
-    let mut object = format!("blob {}\0", content.len()).into_bytes();
-    object.extend_from_slice(&content);
+    println!("{hash}");
 
-    // Calculate SHA-1 of the uncompressed object.
+    Ok(())
+}
+
+fn write_object(object_type: &str, content: &[u8]) -> io::Result<String> {
+    // Build Git object: <type> <size>\0<content>
+    let mut object = format!("{object_type} {}\0", content.len()).into_bytes();
+    object.extend_from_slice(content);
+
+    // Calculate SHA-1.
     let hash = Sha1::digest(&object);
     let hash_hex = hex::encode(hash);
 
-    // Compress object using Zlib.
+    // Compress using Zlib.
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&object)?;
     let compressed = encoder.finish()?;
 
-    // Write to .git/objects/<first 2 chars>/<remaining 38 chars>.
+    // Store in .git/objects.
     let (directory, filename) = hash_hex.split_at(2);
     let object_dir = format!(".git/objects/{directory}");
 
     fs::create_dir_all(&object_dir)?;
     fs::write(format!("{object_dir}/{filename}"), compressed)?;
 
-    // Print object hash.
-    println!("{hash_hex}");
-
-    Ok(())
+    Ok(hash_hex)
 }
 
 #[allow(dead_code)]
@@ -171,6 +179,74 @@ fn ls_tree(tree_sha: &str) -> io::Result<()> {
     for entry in entries {
         println!("{}", entry.name);
     }
+
+    Ok(())
+}
+
+fn serialize_tree_entry(entry: &TreeEntry) -> Vec<u8> {
+    let mut data = Vec::new();
+
+    data.extend_from_slice(entry.mode.as_bytes());
+    data.push(b' ');
+    data.extend_from_slice(entry.name.as_bytes());
+    data.push(0);
+    data.extend_from_slice(&entry.sha);
+
+    data
+}
+
+fn write_tree_object(entries: &[TreeEntry]) -> io::Result<String> {
+    let mut content = Vec::new();
+
+    for entry in entries {
+        content.extend_from_slice(&serialize_tree_entry(entry));
+    }
+
+    write_object("tree", &content)
+}
+
+fn write_tree_recursive(dir: &Path) -> io::Result<String> {
+    let mut entries = Vec::new();
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        if name == ".git" {
+            continue;
+        }
+
+        let metadata = fs::metadata(&path)?;
+
+        let (mode, sha) = if metadata.is_dir() {
+            let sha_hex = write_tree_recursive(&path)?;
+            let sha = hex::decode(sha_hex).unwrap().try_into().unwrap();
+
+            ("40000", sha)
+        } else {
+            let content = fs::read(&path)?;
+            let sha_hex = write_object("blob", &content)?;
+            let sha = hex::decode(sha_hex).unwrap().try_into().unwrap();
+
+            ("100644", sha)
+        };
+
+        entries.push(TreeEntry {
+            mode: mode.to_string(),
+            name,
+            sha,
+        });
+    }
+
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+    write_tree_object(&entries)
+}
+
+fn write_tree() -> io::Result<()> {
+    let sha = write_tree_recursive(Path::new("."))?;
+    println!("{sha}");
 
     Ok(())
 }
