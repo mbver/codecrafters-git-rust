@@ -1,13 +1,10 @@
-use flate2::Compression;
-use flate2::read::ZlibDecoder;
-use flate2::write::ZlibEncoder;
-
-use sha1::Digest;
-use sha1::Sha1;
 use std::env;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::Path;
+
+use crate::git::object::read_object;
+use crate::git::object::write_object_at;
 
 mod git;
 
@@ -53,39 +50,13 @@ fn main() {
     }
 }
 fn cat_file(hash: &str) -> io::Result<()> {
-    let object_path = format!(".git/objects/{}/{}", &hash[..2], &hash[2..]);
+    let (object_type, content) = read_object(Path::new(".git"), hash)?;
 
-    // Read compressed object.
-    let compressed = fs::read(object_path)?;
-
-    // Decompress using Zlib.
-    let mut decoder = ZlibDecoder::new(&compressed[..]);
-    let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed)?;
-
-    // Extract header and content.
-    let header_end = decompressed
-        .iter()
-        .position(|&byte| byte == 0)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Missing null byte"))?;
-
-    let header = &decompressed[..header_end];
-    let content = &decompressed[header_end + 1..];
-
-    // Validate blob header.
-    let header =
-        std::str::from_utf8(header).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-    let (object_type, size) = header
-        .split_once(' ')
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid header"))?;
-
-    if object_type != "blob" || content.len() != size.parse::<usize>().unwrap_or(usize::MAX) {
+    if object_type != "blob" {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid blob"));
     }
 
-    // Write blob content directly to stdout.
-    io::stdout().write_all(content)?;
+    io::stdout().write_all(&content)?;
 
     Ok(())
 }
@@ -101,27 +72,7 @@ fn hash_object(file_path: &str) -> io::Result<()> {
 }
 
 fn write_object(object_type: &str, content: &[u8]) -> io::Result<String> {
-    // Build Git object: <type> <size>\0<content>
-    let mut object = format!("{object_type} {}\0", content.len()).into_bytes();
-    object.extend_from_slice(content);
-
-    // Calculate SHA-1.
-    let hash = Sha1::digest(&object);
-    let hash_hex = hex::encode(hash);
-
-    // Compress using Zlib.
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&object)?;
-    let compressed = encoder.finish()?;
-
-    // Store in .git/objects.
-    let (directory, filename) = hash_hex.split_at(2);
-    let object_dir = format!(".git/objects/{directory}");
-
-    fs::create_dir_all(&object_dir)?;
-    fs::write(format!("{object_dir}/{filename}"), compressed)?;
-
-    Ok(hash_hex)
+    write_object_at(Path::new(".git"), object_type, content)
 }
 
 struct TreeEntry {
@@ -130,20 +81,9 @@ struct TreeEntry {
     sha: [u8; 20],
 }
 fn ls_tree(tree_sha: &str) -> io::Result<()> {
-    let object_path = format!(".git/objects/{}/{}", &tree_sha[..2], &tree_sha[2..]);
+    let (object_type, object) = read_object(Path::new(".git"), tree_sha)?;
 
-    let compressed = fs::read(object_path)?;
-    let mut decoder = ZlibDecoder::new(compressed.as_slice());
-
-    let mut object = Vec::new();
-    decoder.read_to_end(&mut object)?;
-
-    let header_end = object
-        .iter()
-        .position(|&b| b == 0)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid tree header"))?;
-
-    if !object[..header_end].starts_with(b"tree ") {
+    if object_type != "tree" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Not a tree object",
@@ -151,7 +91,7 @@ fn ls_tree(tree_sha: &str) -> io::Result<()> {
     }
 
     let mut entries = Vec::new();
-    let mut cursor = header_end + 1;
+    let mut cursor = 0;
 
     while cursor < object.len() {
         // Read mode.
