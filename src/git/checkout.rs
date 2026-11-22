@@ -38,6 +38,19 @@ pub fn get_commit_tree(git_dir: &Path, commit_sha: &str) -> io::Result<String> {
 }
 
 // Recursively reconstruct a tree in the working directory.
+/*
+* In Git, a tree object is like a snapshot of a directory: it stores a list of entries,
+* where each entry has a file mode (permissions/type), a name, and a 20-byte SHA-1 hash
+* pointing to either a blob (file contents) or another tree (subdirectory).
+*
+* Materializes each entry onto disk at directory.join(name):
+    - "40000" | "040000" (directory): Recursively calls checkout_tree(git_dir, &sha, &path).
+    - "100644" | "100755" (regular file): Reads the blob object for sha, writes its bytes to path,
+        and sets 0o755 (executable) permissions if mode == "100755".
+    - "120000" (symlink): Reads the target path from the blob and creates a real filesystem symlink
+        via std::os::unix::fs::symlink.
+    - "160000" (git submodule link): Creates an empty directory at path instead of cloning the submodule.
+*/
 pub fn checkout_tree(git_dir: &Path, tree_sha: &str, directory: &Path) -> io::Result<()> {
     let (object_type, content) = read_object(git_dir, tree_sha)?;
 

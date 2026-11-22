@@ -59,6 +59,7 @@ pub fn parse_pack_entries(data: &[u8]) -> io::Result<Vec<PackEntry>> {
         ));
     }
 
+    // try_into convert &[u8] to [u8;4]
     let version = u32::from_be_bytes(data[4..8].try_into().unwrap());
 
     let count = u32::from_be_bytes(data[8..12].try_into().unwrap()) as usize;
@@ -106,6 +107,8 @@ pub fn parse_pack_entries(data: &[u8]) -> io::Result<Vec<PackEntry>> {
             }
 
             7 => {
+                // ref-delta refer base-object with it sha
+                // the base object can be anywhere in the pack
                 let base_sha = data.get(cursor..cursor + 20).ok_or_else(|| {
                     io::Error::new(io::ErrorKind::UnexpectedEof, "Missing REF_DELTA base SHA")
                 })?;
@@ -181,7 +184,18 @@ enum EntryKind {
     Ref(String),
 }
 
-// Read the variable-length object header.
+// read object type and the uncompressed length
+/*
+In a Git .pack file, each object starts with a variable-length header.
+    Byte 1 (the first byte) holds both the type and the lowest 4 bits of the size:
+        Bit 7 (0x80): Continuation flag (1 = more size bytes follow; 0 = this is the last header byte).
+        Bits 6..4 ((byte >> 4) & 0x07): 3-bit object type (1 = commit, 2 = tree,
+            3 = blob, 4 = tag, 6 = OFS_DELTA, 7 = REF_DELTA).
+        Bits 3..0 (byte & 0x0f): Least significant 4 bits of the uncompressed size.
+    Bytes 2+ (optional continuation bytes) each hold 7 more bits of the size in little-endian bit order (least significant bits come first):
+        Bit 7 (0x80): Continuation flag (1 = another byte follows; 0 = done).
+        Bits 6..0 (byte & 0x7f): Next 7 bits of the size.
+*/
 fn read_object_header(data: &[u8], cursor: &mut usize) -> io::Result<(u8, usize)> {
     let mut byte = *data
         .get(*cursor)
@@ -220,7 +234,27 @@ fn read_object_header(data: &[u8], cursor: &mut usize) -> io::Result<(u8, usize)
     Ok((object_type, size))
 }
 
-// Read the special OFS_DELTA base offset encoding.
+/*
+*Off-delta object tell how many bytes back in the file the base object is.
+    -Suppose this object starts at byte 1000 in the file (object_offset = 1000),
+        and its base object starts at byte 872.
+            - base is 128 bytes back (1000 - 872 = 128).
+            - The number 128 is what gets encoded into those bytes.
+            - When your code reads 128, it does 1000 - 128 = 872 to jump back to the base object.
+
+Why use "how many bytes back" instead of "byte 872"?
+    - Smaller numbers = fewer bytes: Nearby objects have small distances (like 50 bytes back), which fit in 1 byte.
+
+The left-most bit is the continuation flag.
+
+Git's decode: the first group gets +1 before the shift.
+    (aaaaaaa + 1) bbbbbbb
+    So the high part can be 8 bits wide, and the largest 2-byte result is:
+        10000000 1111111       15 bits
+    In case the 1st group is 1000 0000, the value is
+        00000001 1111111
+*/
+// compute offset of the base object
 fn read_ofs_delta_offset(
     data: &[u8],
     cursor: &mut usize,
@@ -286,7 +320,39 @@ fn read_delta_size(data: &[u8], cursor: &mut usize) -> io::Result<usize> {
     }
 }
 
-// Apply delta instructions to a base object.
+/*
+* How Overwriting Works with Only Copy & Insert
+    - copy the part of base before the changed region.
+    - insert the new replacement bytes (instead of copying the old bytes from base).
+    - copy the part of base after the changed region.
+*/
+/*
+Copy: Take a piece of the old base file and paste it onto the end of the new file
+Bit position:   7     6     5     4     3     2     1     0
+              +-----+-----+-----+-----+-----+-----+-----+-----+
+Meaning:      |  1  |  S2 |  S1 |  S0 |  O3 |  O2 |  O1 |  O0 |
+              +-----+-----+-----+-----+-----+-----+-----+-----+
+Role:         |Copy | <--- Size --->| <------ Offset ------>|
+              |flag |   switches    |       switches        |
+
+Example
+    Suppose command is 0b1001_0011 (0x93):
+
+        Plaintext
+        Bit:      7   6   5   4   3   2   1   0
+        Value:    1   0   0   1   0   0   1   1
+                │   └───┴───┘   └───────┴───┘
+                │       │            │
+            Copy flag  S0 is 1     O0 and O1 are 1
+                    (1 size byte) (2 offset bytes)
+        Right after this 0x93 byte in delta, you will read 3 extra bytes in this exact order:
+
+        Offset Byte 0 (because O0 is 1)
+
+        Offset Byte 1 (because O1 is 1)
+
+        Size Byte 0 (because S0 is 1)
+*/
 fn apply_delta(base: &[u8], delta: &[u8]) -> io::Result<Vec<u8>> {
     let mut cursor = 0;
 
@@ -311,7 +377,7 @@ fn apply_delta(base: &[u8], delta: &[u8]) -> io::Result<Vec<u8>> {
             let mut offset = 0usize;
             let mut size = 0usize;
 
-            // Offset bytes.
+            // Offset bytes are right after the header bytes
             for i in 0..4 {
                 if command & (1 << i) != 0 {
                     let byte = *delta.get(cursor).ok_or_else(|| {
@@ -324,7 +390,7 @@ fn apply_delta(base: &[u8], delta: &[u8]) -> io::Result<Vec<u8>> {
                 }
             }
 
-            // Size bytes.
+            // Size bytes are right after offset bytes
             for i in 0..3 {
                 if command & (1 << (4 + i)) != 0 {
                     let byte = *delta.get(cursor).ok_or_else(|| {
@@ -391,7 +457,12 @@ fn apply_delta(base: &[u8], delta: &[u8]) -> io::Result<Vec<u8>> {
     Ok(result)
 }
 
-// Resolve all objects and store them as loose Git objects.
+/*
+ * write full objects inside .git director and add them to look up tables to later resolve deltas
+ * the deltas objects are pushed into remaining. at each pass, unresolved deltas are pushed into a new remaining queue
+ * for delta objects that have a matching full base object, resolve it and set resolved_any to true
+ * at the end of each pass, if no delta is resolved and remaining is not empty, no progress is possible, return error
+ */
 pub fn resolve_pack(entries: Vec<PackEntry>, git_dir: &Path) -> io::Result<()> {
     // OFS_DELTA needs lookup by packfile offset.
     let mut by_offset: HashMap<usize, ResolvedObject> = HashMap::new();
